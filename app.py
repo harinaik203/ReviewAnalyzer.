@@ -10,7 +10,7 @@ import os
 # ------------------------------
 # Set base directory for files
 # ------------------------------
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+BASE_DIR = os.getcwd()  # safely uses the current working directory on Streamlit Cloud
 
 # ------------------------------
 # Load vocab
