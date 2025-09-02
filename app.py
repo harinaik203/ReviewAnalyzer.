@@ -5,15 +5,21 @@ import torch.nn.functional as F
 import pickle
 import re
 import string
-from collections import Counter
+import os
+
+# ------------------------------
+# Set base directory for files
+# ------------------------------
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # ------------------------------
 # Load vocab
 # ------------------------------
-with open("vocab.pkl", "rb") as f:
+vocab_path = os.path.join(BASE_DIR, "vocab.pkl")
+with open(vocab_path, "rb") as f:
     vocab = pickle.load(f)
 
-word2idx = {word: idx+2 for idx, word in enumerate(vocab)}
+word2idx = {word: idx + 2 for idx, word in enumerate(vocab)}
 word2idx['<PAD>'] = 0
 word2idx['<UNK>'] = 1
 
@@ -24,16 +30,16 @@ max_len = 100
 # ------------------------------
 def simple_tokenize(text):
     text = text.lower()
-    text = re.sub(r'\n',' ', text)
-    text = re.sub(r'\d+','', text)
+    text = re.sub(r'\n', ' ', text)
+    text = re.sub(r'\d+', '', text)
     text = text.translate(str.maketrans('', '', string.punctuation))
     return text.strip().split()
 
 def encode_tokens(tokens):
     tokens = tokens[:max_len]
-    ids = [word2idx.get(token,1) for token in tokens]
+    ids = [word2idx.get(token, 1) for token in tokens]
     if len(ids) < max_len:
-        ids += [0]*(max_len - len(ids))
+        ids += [0] * (max_len - len(ids))
     return ids
 
 # ------------------------------
@@ -55,12 +61,12 @@ class MultiHeadSelfAttention(nn.Module):
 
     def forward(self, x):
         B, T, E = x.size()
-        Q = self.query(x).view(B, T, self.num_heads, self.head_dim).transpose(1,2)
-        K = self.key(x).view(B, T, self.num_heads, self.head_dim).transpose(1,2)
-        V = self.value(x).view(B, T, self.num_heads, self.head_dim).transpose(1,2)
-        attn_weights = torch.matmul(Q, K.transpose(-2,-1)) / self.scale
+        Q = self.query(x).view(B, T, self.num_heads, self.head_dim).transpose(1, 2)
+        K = self.key(x).view(B, T, self.num_heads, self.head_dim).transpose(1, 2)
+        V = self.value(x).view(B, T, self.num_heads, self.head_dim).transpose(1, 2)
+        attn_weights = torch.matmul(Q, K.transpose(-2, -1)) / self.scale
         attn_probs = F.softmax(attn_weights, dim=-1)
-        attn_out = torch.matmul(attn_probs, V).transpose(1,2).contiguous().view(B,T,E)
+        attn_out = torch.matmul(attn_probs, V).transpose(1, 2).contiguous().view(B, T, E)
         return self.fc_out(attn_out)
 
 class TransformerBlock(nn.Module):
@@ -75,6 +81,7 @@ class TransformerBlock(nn.Module):
             nn.Linear(ff_dim, embed_dim)
         )
         self.dropout = nn.Dropout(dropout)
+
     def forward(self, x):
         attn_out = self.attention(x)
         x = self.norm1(x + self.dropout(attn_out))
@@ -86,6 +93,7 @@ class AttentionPooling(nn.Module):
     def __init__(self, embed_dim):
         super().__init__()
         self.attention = nn.Linear(embed_dim, 1)
+
     def forward(self, x):
         scores = self.attention(x)
         weights = torch.softmax(scores, dim=1)
@@ -112,9 +120,11 @@ class TransformerClassifier(nn.Module):
 # ------------------------------
 # Load model
 # ------------------------------
+model_path = os.path.join(BASE_DIR, "sentiment_model.pth")
 vocab_size = len(vocab) + 2
+
 model = TransformerClassifier(vocab_size=vocab_size)
-model.load_state_dict(torch.load("sentiment_model.pth", map_location=torch.device("cpu")))
+model.load_state_dict(torch.load(model_path, map_location=torch.device("cpu")))
 model.eval()
 
 # ------------------------------
@@ -124,7 +134,7 @@ def predict_review_safe(review):
     if not review.strip():
         return "No review text provided"
     tokens = simple_tokenize(review)
-    if len(tokens)==0:
+    if len(tokens) == 0:
         return "No valid tokens found in review"
     encoded = encode_tokens(tokens)
     input_tensor = torch.tensor([encoded], dtype=torch.long)
