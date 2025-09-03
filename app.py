@@ -5,23 +5,18 @@ import torch.nn.functional as F
 import pickle
 import re
 import string
+import numpy as np
 import os
-
-# ------------------------------
-# Set base directory for files
-# ------------------------------
-BASE_DIR = os.getcwd()  # safely uses the current working directory on Streamlit Cloud
 
 # ------------------------------
 # Load vocab
 # ------------------------------
-vocab_path = os.path.join(BASE_DIR, "vocab.pkl")
-with open(vocab_path, "rb") as f:
+with open("vocab.pkl", "rb") as f:
     vocab = pickle.load(f)
 
 word2idx = {word: idx + 2 for idx, word in enumerate(vocab)}
-word2idx['<PAD>'] = 0
-word2idx['<UNK>'] = 1
+word2idx["<PAD>"] = 0
+word2idx["<UNK>"] = 1
 
 max_len = 100
 
@@ -30,9 +25,9 @@ max_len = 100
 # ------------------------------
 def simple_tokenize(text):
     text = text.lower()
-    text = re.sub(r'\n', ' ', text)
-    text = re.sub(r'\d+', '', text)
-    text = text.translate(str.maketrans('', '', string.punctuation))
+    text = re.sub(r"\n", " ", text)
+    text = re.sub(r"\d+", "", text)
+    text = text.translate(str.maketrans("", "", string.punctuation))
     return text.strip().split()
 
 def encode_tokens(tokens):
@@ -54,7 +49,7 @@ class MultiHeadSelfAttention(nn.Module):
         self.head_dim = embed_dim // num_heads
 
         self.query = nn.Linear(embed_dim, embed_dim)
-        self.key   = nn.Linear(embed_dim, embed_dim)
+        self.key = nn.Linear(embed_dim, embed_dim)
         self.value = nn.Linear(embed_dim, embed_dim)
         self.fc_out = nn.Linear(embed_dim, embed_dim)
         self.scale = torch.sqrt(torch.tensor(self.head_dim, dtype=torch.float32))
@@ -89,75 +84,84 @@ class TransformerBlock(nn.Module):
         x = self.norm2(x + self.dropout(ff_out))
         return x
 
-class AttentionPooling(nn.Module):
-    def __init__(self, embed_dim):
-        super().__init__()
-        self.attention = nn.Linear(embed_dim, 1)
-
-    def forward(self, x):
-        scores = self.attention(x)
-        weights = torch.softmax(scores, dim=1)
-        pooled = (x * weights).sum(dim=1)
-        return pooled
-
 class TransformerClassifier(nn.Module):
-    def __init__(self, vocab_size, embed_dim=64, num_heads=4, hidden_dim=128, num_classes=5, num_layers=2, max_len=100):
+    def __init__(self, vocab_size, embed_dim=64, num_heads=4, hidden_dim=128,
+                 num_classes=5, num_layers=2, max_len=100):
         super().__init__()
         self.embedding = nn.Embedding(vocab_size, embed_dim, padding_idx=0)
-        self.pos_encoding = nn.Parameter(torch.zeros(1, max_len, embed_dim))
-        self.transformer_blocks = nn.ModuleList([TransformerBlock(embed_dim, num_heads, hidden_dim) for _ in range(num_layers)])
-        self.pooling = AttentionPooling(embed_dim)
+        self.cls_token = nn.Parameter(torch.randn(1, 1, embed_dim))   # [CLS] token
+        self.pos_encoding = nn.Parameter(torch.zeros(1, max_len + 1, embed_dim))  # +1 for CLS
+
+        self.transformer_blocks = nn.ModuleList([
+            TransformerBlock(embed_dim, num_heads, hidden_dim) for _ in range(num_layers)
+        ])
+
         self.fc = nn.Linear(embed_dim, num_classes)
 
     def forward(self, x):
-        seq_len = x.size(1)
-        x = self.embedding(x) + self.pos_encoding[:, :seq_len, :]
+        B, T = x.size()
+        emb = self.embedding(x)                        # [B, T, E]
+        cls_tokens = self.cls_token.expand(B, -1, -1)  # [B, 1, E]
+        emb = torch.cat([cls_tokens, emb], dim=1)      # prepend CLS
+        seq_len = emb.size(1)
+        emb = emb + self.pos_encoding[:, :seq_len, :]
+        out = emb
         for block in self.transformer_blocks:
-            x = block(x)
-        x = self.pooling(x)
-        return self.fc(x)
+            out = block(out)
+        cls_out = out[:, 0, :]   # take CLS only
+        return self.fc(cls_out)
 
 # ------------------------------
 # Load model
 # ------------------------------
-model_path = os.path.join(BASE_DIR, "sentiment_model.pth")
-vocab_size = len(vocab) + 2
+model = TransformerClassifier(
+    vocab_size=len(vocab) + 2,
+    embed_dim=64,
+    num_heads=4,
+    hidden_dim=128,
+    num_classes=5,
+    num_layers=2,
+    max_len=max_len
+)
 
-model = TransformerClassifier(vocab_size=vocab_size)
-model.load_state_dict(torch.load(model_path, map_location=torch.device("cpu")))
+model.load_state_dict(torch.load("sentiment_model.pth", map_location=torch.device("cpu")))
 model.eval()
 
 # ------------------------------
-# Prediction function
+# Prediction functions
 # ------------------------------
-def predict_review_safe(review):
-    if not review.strip():
-        return "No review text provided"
+def predict_review_chunked(review, max_len=100):
     tokens = simple_tokenize(review)
-    if len(tokens) == 0:
-        return "No valid tokens found in review"
-    encoded = encode_tokens(tokens)
-    input_tensor = torch.tensor([encoded], dtype=torch.long)
+    if not tokens:
+        return "No valid tokens found"
+
+    chunks = [tokens[i:i+max_len] for i in range(0, len(tokens), max_len)]
+    preds, confs = [], []
+
     with torch.no_grad():
-        outputs = model(input_tensor)
-        probs = torch.softmax(outputs, dim=1)
-        conf, pred = torch.max(probs, dim=1)
-    CONF_THRESHOLD = 0.7
-    if conf.item() < CONF_THRESHOLD:
-        return "Low confidence – review may need human check"
-    return pred.item() + 1
+        for chunk in chunks:
+            encoded = encode_tokens(chunk)
+            input_tensor = torch.tensor([encoded], dtype=torch.long)
+            outputs = model(input_tensor)
+            probs = torch.softmax(outputs, dim=1)
+            conf, pred = torch.max(probs, dim=1)
+            preds.append(pred.item() + 1)
+            confs.append(conf.item())
+
+    best_idx = np.argmax(confs)
+    return f"{preds[best_idx]} stars (confidence: {confs[best_idx]:.2f})"
 
 # ------------------------------
-# Streamlit interface
+# Streamlit UI
 # ------------------------------
-st.title("Review Sentiment Rating")
-st.write("Enter a product review and get a rating from 1 (bad) to 5 (good).")
+st.title("📊 Review Sentiment Rating")
+st.write("Enter a product review and get a rating from 1 ⭐ (bad) to 5 ⭐ (good).")
 
 user_input = st.text_area("Type your review here:", height=150)
 
 if st.button("Predict"):
     if user_input.strip() != "":
-        rating = predict_review_safe(user_input)
+        rating = predict_review_chunked(user_input)
         st.success(f"Predicted Rating: {rating}")
     else:
-        st.warning("Please enter some text to predict.")
+        st.warning("⚠️ Please enter some text to predict.")
